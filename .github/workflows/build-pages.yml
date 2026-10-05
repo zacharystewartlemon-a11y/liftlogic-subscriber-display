@@ -1,0 +1,68 @@
+name: Build firmware and installer
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install PlatformIO
+        run: pip install platformio
+
+      - name: Build 2.8-inch CYD firmware
+        run: pio run -e cyd
+
+      - name: Assemble web installer
+        shell: bash
+        run: |
+          mkdir -p site
+          cp installer/index.html site/index.html
+          cp installer/manifest.json site/manifest.json
+          cp .pio/build/cyd/firmware.bin site/firmware.bin
+          cp .pio/build/cyd/bootloader.bin site/bootloader.bin
+          cp .pio/build/cyd/partitions.bin site/partitions.bin
+
+          if [ -f .pio/build/cyd/boot_app0.bin ]; then
+            cp .pio/build/cyd/boot_app0.bin site/boot_app0.bin
+          else
+            cp ~/.platformio/packages/framework-arduinoespressif32/tools/partitions/boot_app0.bin site/boot_app0.bin
+          fi
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

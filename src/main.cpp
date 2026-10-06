@@ -10,8 +10,8 @@ WebServer server(80);
 Preferences prefs;
 
 constexpr uint8_t BACKLIGHT_PIN = 21;
-constexpr uint8_t BACKLIGHT_CHANNEL = 0;
-constexpr uint16_t BACKLIGHT_FREQ = 5000;
+constexpr uint8_t BACKLIGHT_CHANNEL = 7;
+constexpr uint16_t BACKLIGHT_FREQ = 1000;
 constexpr uint8_t BACKLIGHT_RESOLUTION = 8;
 
 uint8_t brightnessPercent = 80;
@@ -65,7 +65,7 @@ small{color:#aaa}
 <body>
 <div class="card">
 <h1>LiftLogic Display</h1>
-<p>Hardware test firmware v0.1</p>
+<p>Hardware test firmware v0.1.1</p>
 <p><b>Wi-Fi:</b> )rawliteral";
   html += WiFi.SSID();
   html += R"rawliteral(</p>
@@ -79,7 +79,7 @@ small{color:#aaa}
   html += String(brightnessPercent);
   html += R"rawliteral(">
 <p><button id="save">Save brightness</button></p>
-<small>The full subscriber counter, branding, touch controls and bedtime schedule come next.</small>
+<small>The subscriber counter, branding, touch controls and bedtime schedule come next.</small>
 </div>
 <script>
 const slider=document.getElementById('brightness');
@@ -121,12 +121,15 @@ void setup() {
   prefs.begin("liftlogic", false);
   brightnessPercent = prefs.getUChar("brightness", 80);
 
+  tft.init();
+  tft.setRotation(1);
+
+  // TFT_eSPI can take ownership of the backlight pin during init on CYD boards.
+  // Attach PWM only after the TFT is initialized so brightness changes keep working.
   ledcSetup(BACKLIGHT_CHANNEL, BACKLIGHT_FREQ, BACKLIGHT_RESOLUTION);
   ledcAttachPin(BACKLIGHT_PIN, BACKLIGHT_CHANNEL);
   setBrightness(brightnessPercent);
 
-  tft.init();
-  tft.setRotation(1);
   tft.fillScreen(TFT_BLACK);
   drawSetupScreen();
 

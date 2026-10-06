@@ -24,7 +24,7 @@ constexpr char TZ_INFO[]="MST7MDT,M3.2.0/2,M11.1.0/2";
 constexpr uint8_t BL_PIN=21, BL_CH=7;
 constexpr uint32_t BL_FREQ=20000;
 constexpr uint8_t T_IRQ=36,T_MOSI=32,T_MISO=39,T_CLK=25,T_CS=33;
-constexpr int TX0=200,TX1=3700,TY0=240,TY1=3800;
+constexpr int TOUCH_X_MIN=200,TOUCH_X_MAX=3700,TOUCH_Y_MIN=240,TOUCH_Y_MAX=3800;
 
 SPIClass touchSPI(VSPI);
 XPT2046_Touchscreen touch(T_CS,T_IRQ);
@@ -197,8 +197,8 @@ void adjust(uint16_t&v,int d){int n=(int)v+d;while(n<0)n+=1440;while(n>=1440)n-=
 bool readTouch(int&x,int&y){
   if(millis()-lastTouch<220||!touch.touched())return false;
   TS_Point p=touch.getPoint();
-  x=constrain(map(p.x,TX0,TX1,0,319),0,319);
-  y=constrain(map(p.y,TY0,TY1,0,239),0,239);
+  x=constrain(map(p.x,TOUCH_X_MIN,TOUCH_X_MAX,0,319),0,319);
+  y=constrain(map(p.y,TOUCH_Y_MIN,TOUCH_Y_MAX,0,239),0,239);
   lastTouch=millis(); return true;
 }
 void handleTouch(){

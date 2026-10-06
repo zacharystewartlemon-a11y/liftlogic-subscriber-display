@@ -2,23 +2,19 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">\n  <meta name="description" content="LiftLogic ESP32 subscriber display installer.">
-  <title>LiftLogic Subscriber Display Installer</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="LiftLogic ESP32 subscriber display installer.">
+  <title>LiftLogic Subscriber Display</title>
   <script type="module" src="https://unpkg.com/esp-web-tools@10.1.1/dist/web/install-button.js?module"></script>
   <style>
-    body{font-family:system-ui,-apple-system,sans-serif;max-width:720px;margin:48px auto;padding:0 20px;background:#0c0c0c;color:#f3f3f3}
-    .card{background:#171717;border:1px solid #333;border-radius:18px;padding:28px}
-    h1{margin-top:0} p{line-height:1.55}.warn{color:#ffd166}.muted{color:#aaa}
-    esp-web-install-button{display:block;margin:28px 0}
+    :root{color-scheme:dark;--cyan:#19b8ff;--purple:#8b4dff}
+    *{box-sizing:border-box}body{font-family:Inter,system-ui,-apple-system,sans-serif;max-width:720px;margin:48px auto;padding:0 20px;background:#07080b;color:#f7f7fb}
+    .card{background:#11141a;border:1px solid #2c3340;border-radius:20px;padding:30px;box-shadow:0 20px 80px #0008}
+    .accent{height:3px;border-radius:9px;background:linear-gradient(90deg,var(--cyan),var(--purple));margin:12px 0 24px}.brand{font-size:36px;font-weight:850;letter-spacing:-1px}.muted{color:#a7adba}.warn{color:#ffd166}p{line-height:1.55}esp-web-install-button{display:block;margin:28px 0}
   </style>
 </head>
-<body>
-  <div class="card">
-    <h1>LiftLogic Subscriber Display</h1>
-    <p>2.8-inch ESP32-2432S028R hardware-test firmware.</p>
-    <p class="warn"><strong>Installing this replaces the firmware currently on the board. Back up anything you want to keep before continuing.</strong></p>
-    <esp-web-install-button manifest="manifest.json"></esp-web-install-button>
-    <p class="muted">Use Chrome or Edge on a computer. Connect the CYD with a data-capable USB cable, click Install, and select the ESP32 serial device when asked.</p>
-  </div>
-</body>
-</html>
+<body><div class="card"><div class="brand">LiftLogic</div><div class="muted">Subscriber Display · v0.3</div><div class="accent"></div>
+<p>Branded live YouTube subscriber display for the 2.8-inch ESP32-2432S028R.</p>
+<p class="warn"><strong>Installing replaces the firmware currently on the board. Leave erase unchecked if you want to preserve saved Wi-Fi and device settings.</strong></p>
+<esp-web-install-button manifest="manifest.json"></esp-web-install-button>
+<p class="muted">Use Chrome or Edge on a computer with a data-capable USB cable.</p></div></body></html>

@@ -15,7 +15,7 @@ Preferences prefs;
 constexpr char CHANNEL_ID[] = "UC0F9K9qnsopawSgePiOls3g";
 constexpr uint8_t BACKLIGHT_PIN = 21;
 constexpr uint8_t BACKLIGHT_CHANNEL = 7;
-constexpr uint16_t BACKLIGHT_FREQ = 1000;
+constexpr uint16_t BACKLIGHT_FREQ = 20000;
 constexpr uint8_t BACKLIGHT_RESOLUTION = 8;
 constexpr unsigned long YOUTUBE_POLL_MS = 15000;
 

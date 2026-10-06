@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <TFT_eSPI.h>
+#include "Free_Fonts.h"
 #include <WiFi.h>
 #include <WebServer.h>
 #include <WiFiManager.h>
@@ -7,305 +8,295 @@
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
 #include <ArduinoJson.h>
+#include <SPI.h>
+#include <XPT2046_Touchscreen.h>
+#include <time.h>
+#include "logo_brain.h"
 
-TFT_eSPI tft = TFT_eSPI();
+TFT_eSPI tft;
 WebServer server(80);
 Preferences prefs;
 
-constexpr char CHANNEL_ID[] = "UC0F9K9qnsopawSgePiOls3g";
-constexpr uint8_t BACKLIGHT_PIN = 21;
-constexpr uint8_t BACKLIGHT_CHANNEL = 7;
-constexpr uint16_t BACKLIGHT_FREQ = 20000;
-constexpr uint8_t BACKLIGHT_RESOLUTION = 8;
-constexpr unsigned long YOUTUBE_POLL_MS = 15000;
+constexpr char CHANNEL_ID[]="UC0F9K9qnsopawSgePiOls3g";
+constexpr char FW[]="0.3.0";
+constexpr char TZ_INFO[]="MST7MDT,M3.2.0/2,M11.1.0/2";
 
-uint8_t brightnessPercent = 80;
-String youtubeApiKey;
-String subscriberCount = "--";
-String lastStatus = "Waiting for API key";
-unsigned long lastYouTubePoll = 0;
+constexpr uint8_t BL_PIN=21, BL_CH=7;
+constexpr uint32_t BL_FREQ=20000;
+constexpr uint8_t T_IRQ=36,T_MOSI=32,T_MISO=39,T_CLK=25,T_CS=33;
+constexpr int TX0=200,TX1=3700,TY0=240,TY1=3800;
 
-void setBrightness(uint8_t percent) {
-  brightnessPercent = constrain(percent, 0, 100);
-  uint8_t duty = map(brightnessPercent, 0, 100, 0, 255);
-  ledcWrite(BACKLIGHT_CHANNEL, duty);
-  prefs.putUChar("brightness", brightnessPercent);
+SPIClass touchSPI(VSPI);
+XPT2046_Touchscreen touch(T_CS,T_IRQ);
+
+const uint16_t BLUE=TFT_CYAN, PURPLE=0x801F, PANEL=0x0841, LINE=0x1082, DIM=0x9CF3;
+const uint16_t REFRESHES[]={15,30,60,300};
+const uint16_t WAKES[]={15,30,60,120};
+
+uint8_t brightness=80;
+uint16_t refreshSec=15,sleepStart=1380,sleepEnd=420,wakeSec=30;
+bool sleepOn=false,sleeping=false,lastWifi=false;
+String apiKey,count="--",shown="",statusText="Waiting";
+unsigned long lastPoll=0,wakeUntil=0,lastTouch=0;
+
+enum Screen{MAIN,SETTINGS,SLEEPSET};
+Screen screen=MAIN;
+
+void backlight(uint8_t p){ ledcWrite(BL_CH,map(constrain(p,0,100),0,100,0,255)); }
+void saveBrightness(int p){
+  brightness=constrain(p,0,100);
+  prefs.putUChar("brightness",brightness);
+  if(!sleeping) backlight(brightness);
+}
+bool tempWake(){ return wakeUntil && (long)(wakeUntil-millis())>0; }
+bool nowMinutes(uint16_t &m){
+  struct tm ti;
+  if(!getLocalTime(&ti,20)) return false;
+  m=ti.tm_hour*60+ti.tm_min; return true;
+}
+bool inSleepWindow(){
+  if(!sleepOn) return false;
+  uint16_t n; if(!nowMinutes(n)||sleepStart==sleepEnd) return false;
+  if(sleepStart<sleepEnd) return n>=sleepStart&&n<sleepEnd;
+  return n>=sleepStart||n<sleepEnd;
+}
+void updateSleep(){
+  bool want=inSleepWindow()&&!tempWake();
+  if(want!=sleeping){ sleeping=want; backlight(want?0:brightness); }
+}
+String time12(uint16_t m){
+  int h=(m/60)%24,mm=m%60,h12=h%12; if(!h12)h12=12;
+  char b[16]; snprintf(b,sizeof(b),"%d:%02d %s",h12,mm,h>=12?"PM":"AM"); return String(b);
+}
+String time24(uint16_t m){
+  char b[6]; snprintf(b,sizeof(b),"%02u:%02u",m/60,m%60); return String(b);
+}
+bool parseTime(const String&s,uint16_t&m){
+  if(s.length()!=5||s[2]!=':')return false;
+  int h=s.substring(0,2).toInt(),mm=s.substring(3).toInt();
+  if(h<0||h>23||mm<0||mm>59)return false;
+  m=h*60+mm; return true;
 }
 
-void drawCentered(const String &text, int y, int font, uint16_t color = TFT_WHITE) {
-  tft.setTextDatum(MC_DATUM);
-  tft.setTextColor(color, TFT_BLACK);
-  tft.drawString(text, tft.width() / 2, y, font);
+void text(const String&s,int x,int y,uint16_t c,int f,uint8_t d=MC_DATUM){
+  tft.setFreeFont(nullptr); tft.setTextDatum(d); tft.setTextColor(c,TFT_BLACK); tft.drawString(s,x,y,f);
 }
-
-void drawSetupScreen() {
-  tft.fillScreen(TFT_BLACK);
-  drawCentered("LIFT LOGIC", 42, 4);
-  drawCentered("SUBSCRIBER DISPLAY", 76, 2, TFT_CYAN);
-  drawCentered("Wi-Fi setup needed", 126, 2);
-  drawCentered("Connect to:", 157, 2, TFT_LIGHTGREY);
-  drawCentered("LiftLogic-Setup", 183, 4, TFT_YELLOW);
-  drawCentered("Then follow the setup page", 218, 2, TFT_LIGHTGREY);
+void freeText(const String&s,int x,int y,uint16_t c,const GFXfont*f,uint8_t d=MC_DATUM){
+  tft.setTextDatum(d); tft.setTextColor(c); tft.setFreeFont(f); tft.drawString(s,x,y,GFXFF); tft.setFreeFont(nullptr);
 }
-
-void drawApiKeyScreen() {
-  tft.fillScreen(TFT_BLACK);
-  drawCentered("LIFT LOGIC", 40, 4);
-  drawCentered("API KEY NEEDED", 92, 4, TFT_YELLOW);
-  drawCentered(WiFi.localIP().toString(), 140, 4, TFT_WHITE);
-  drawCentered("Open this address", 181, 2, TFT_LIGHTGREY);
-  drawCentered("to finish setup", 205, 2, TFT_LIGHTGREY);
-}
-
-void drawCounterScreen() {
-  tft.fillScreen(TFT_BLACK);
-  drawCentered("LIFT LOGIC", 28, 4, TFT_CYAN);
-  tft.drawFastHLine(45, 52, 230, TFT_DARKGREY);
-  drawCentered(subscriberCount, 116, 7, TFT_WHITE);
-  drawCentered("SUBSCRIBERS", 169, 4, TFT_LIGHTGREY);
-  drawCentered(lastStatus, 218, 2, TFT_DARKGREY);
-}
-
-bool fetchSubscriberCount() {
-  if (youtubeApiKey.isEmpty() || WiFi.status() != WL_CONNECTED) {
-    return false;
+void brain(int x,int y){
+  uint16_t row[LL_BRAIN_W];
+  for(int py=0;py<LL_BRAIN_H;py++){
+    for(int px=0;px<LL_BRAIN_W;px++){
+      int i=py*LL_BRAIN_W+px;
+      uint8_t packed=pgm_read_byte(&LL_BRAIN_PIXELS[i/4]);
+      uint8_t pi=(packed>>(6-2*(i&3)))&3;
+      row[px]=pgm_read_word(&LL_BRAIN_PALETTE[pi]);
+    }
+    tft.pushImage(x,y+py,LL_BRAIN_W,1,row);
   }
+}
+void brand(){
+  brain(28,5);
+  freeText("LiftLogic",194,26,TFT_WHITE,FSSB18);
+}
+void youtube(int x,int y){
+  tft.fillRoundRect(x,y,34,23,6,TFT_RED);
+  tft.fillTriangle(x+13,y+5,x+13,y+18,x+24,y+11,TFT_WHITE);
+}
+void wifiIcon(){
+  tft.fillRect(0,205,58,35,TFT_BLACK);
+  uint16_t c=WiFi.status()==WL_CONNECTED?BLUE:TFT_DARKGREY;
+  int x=19,b=229;
+  tft.fillRect(x,b-4,4,4,c); tft.fillRect(x+7,b-8,4,8,c);
+  tft.fillRect(x+14,b-13,4,13,c); tft.fillRect(x+21,b-18,4,18,c);
+}
+void dots(){
+  tft.fillRect(260,205,60,35,TFT_BLACK);
+  for(int i=0;i<3;i++)tft.fillCircle(279+i*10,222,3,TFT_WHITE);
+}
+void drawCount(bool force=false){
+  if(screen!=MAIN||(!force&&count==shown))return;
+  tft.fillRoundRect(42,116,236,70,10,PANEL);
+  freeText(count,160,150,TFT_WHITE,FSSB24);
+  shown=count;
+}
+void mainScreen(){
+  screen=MAIN; tft.fillScreen(TFT_BLACK);
+  uint16_t grid=tft.color565(3,10,18);
+  for(int x=-80;x<360;x+=42)tft.drawLine(x,58,x+90,203,grid);
+  brand();
+  tft.fillRoundRect(31,64,258,136,14,PANEL);
+  tft.drawRoundRect(31,64,258,136,14,BLUE);
+  tft.drawRoundRect(33,66,254,132,12,PURPLE);
+  youtube(67,80); text("SUBSCRIBERS",190,92,TFT_WHITE,4);
+  tft.drawFastHLine(60,108,200,LINE);
+  shown=""; drawCount(true); wifiIcon(); dots();
+}
+void setupScreen(){
+  tft.fillScreen(TFT_BLACK); brand();
+  freeText("Wi-Fi setup",160,98,TFT_WHITE,FSSB18);
+  text("Connect to LiftLogic-Setup",160,140,BLUE,2);
+  text("then follow the setup page",160,169,DIM,2);
+}
+void apiScreen(){
+  tft.fillScreen(TFT_BLACK); brand();
+  freeText("API key needed",160,95,TFT_WHITE,FSSB18);
+  text(WiFi.localIP().toString(),160,140,BLUE,4);
+  text("Open this address to finish setup",160,178,DIM,2);
+}
+void row(int y,const String&l,const String&v){
+  tft.drawFastHLine(12,y+36,296,LINE);
+  text(l,18,y+18,DIM,2,ML_DATUM); text(v,298,y+18,TFT_WHITE,2,MR_DATUM);
+}
+void settingsScreen(){
+  screen=SETTINGS; tft.fillScreen(TFT_BLACK);
+  text("<",18,20,BLUE,4,ML_DATUM); freeText("Settings",160,21,TFT_WHITE,FSSB12);
+  row(40,"Brightness",String(brightness)+"%    -   +");
+  row(78,"Refresh",refreshSec==15?"15 sec  >":refreshSec==30?"30 sec  >":refreshSec==60?"1 min  >":"5 min  >");
+  row(116,"Auto sleep",String(sleepOn?"ON":"OFF")+"   >");
+  row(154,"Sleep window",time12(sleepStart)+"  >");
+  row(192,"Tap wake",String(wakeSec)+" sec  >");
+}
+void sleepScreen(){
+  screen=SLEEPSET; tft.fillScreen(TFT_BLACK);
+  text("<",18,20,BLUE,4,ML_DATUM); freeText("Sleep timer",160,21,TFT_WHITE,FSSB12);
+  row(48,"Sleep start",time12(sleepStart)); text("-",225,66,BLUE,4); text("+",292,66,BLUE,4);
+  row(96,"Wake time",time12(sleepEnd)); text("-",225,114,BLUE,4); text("+",292,114,BLUE,4);
+  row(144,"Adjust step","30 min"); text("Times save automatically",160,208,DIM,2);
+}
 
-  String url = "https://www.googleapis.com/youtube/v3/channels?part=statistics&id=";
-  url += CHANNEL_ID;
-  url += "&fields=items/statistics(subscriberCount,hiddenSubscriberCount)&key=";
-  url += youtubeApiKey;
-
-  WiFiClientSecure client;
-  client.setInsecure();
-
-  HTTPClient http;
-  http.setTimeout(8000);
-  if (!http.begin(client, url)) {
-    lastStatus = "Connection failed";
-    drawCounterScreen();
-    return false;
-  }
-
-  int code = http.GET();
-  if (code != HTTP_CODE_OK) {
-    lastStatus = "YouTube error " + String(code);
-    http.end();
-    drawCounterScreen();
-    return false;
-  }
-
-  String payload = http.getString();
-  http.end();
-
+bool fetchCount(){
+  if(apiKey.isEmpty()||WiFi.status()!=WL_CONNECTED)return false;
+  String u="https://www.googleapis.com/youtube/v3/channels?part=statistics&id="+String(CHANNEL_ID)
+    +"&fields=items/statistics(subscriberCount,hiddenSubscriberCount)&key="+apiKey;
+  WiFiClientSecure client; client.setInsecure();
+  HTTPClient http; http.setTimeout(8000);
+  if(!http.begin(client,u)){statusText="Connection failed";return false;}
+  int code=http.GET();
+  if(code!=HTTP_CODE_OK){statusText="YouTube "+String(code);http.end();return false;}
+  String payload=http.getString(); http.end();
   JsonDocument doc;
-  DeserializationError error = deserializeJson(doc, payload);
-  if (error) {
-    lastStatus = "Bad API response";
-    drawCounterScreen();
-    return false;
+  if(deserializeJson(doc,payload)||doc["items"].size()==0){statusText="Bad response";return false;}
+  String n;
+  if((bool)(doc["items"][0]["statistics"]["hiddenSubscriberCount"]|false)) n="HIDDEN";
+  else{
+    const char*c=doc["items"][0]["statistics"]["subscriberCount"];
+    if(!c){statusText="No count";return false;} n=String(c);
   }
-
-  if (doc["items"].size() == 0) {
-    lastStatus = "Channel not found";
-    drawCounterScreen();
-    return false;
-  }
-
-  bool hidden = doc["items"][0]["statistics"]["hiddenSubscriberCount"] | false;
-  if (hidden) {
-    subscriberCount = "HIDDEN";
-    lastStatus = "Subscriber count hidden";
-    drawCounterScreen();
-    return true;
-  }
-
-  const char *count = doc["items"][0]["statistics"]["subscriberCount"];
-  if (!count) {
-    lastStatus = "Count unavailable";
-    drawCounterScreen();
-    return false;
-  }
-
-  subscriberCount = String(count);
-  lastStatus = "Live - refreshes every 15 sec";
-  drawCounterScreen();
+  statusText="Live";
+  if(n!=count){count=n;drawCount();}
   return true;
 }
+int refreshIndex(){for(int i=0;i<4;i++)if(REFRESHES[i]==refreshSec)return i;return 0;}
+int wakeIndex(){for(int i=0;i<4;i++)if(WAKES[i]==wakeSec)return i;return 1;}
+void cycleRefresh(){refreshSec=REFRESHES[(refreshIndex()+1)%4];prefs.putUShort("refresh_s",refreshSec);lastPoll=millis();}
+void cycleWake(){wakeSec=WAKES[(wakeIndex()+1)%4];prefs.putUShort("wake_s",wakeSec);}
+void adjust(uint16_t&v,int d){int n=(int)v+d;while(n<0)n+=1440;while(n>=1440)n-=1440;v=n;}
 
-String settingsPage() {
-  String html = R"rawliteral(
-<!doctype html>
-<html>
-<head>
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>LiftLogic Display</title>
-<style>
-body{font-family:system-ui,sans-serif;max-width:560px;margin:40px auto;padding:0 18px;background:#0b0b0b;color:#eee}
-.card{background:#171717;border:1px solid #333;border-radius:16px;padding:20px;margin-bottom:16px}
-h1,h2{margin-top:0} input[type=range]{width:100%} input[type=password]{box-sizing:border-box;width:100%;padding:12px;border-radius:10px;border:1px solid #444;background:#0e0e0e;color:#fff}
-button{padding:12px 16px;border:0;border-radius:10px;font-size:16px;margin-top:10px}
-small{color:#aaa}.ok{color:#6ee7b7}.muted{color:#aaa}
-</style>
-</head>
-<body>
-<div class="card">
-<h1>LiftLogic Display</h1>
-<p>Firmware v0.2</p>
-<p><b>Wi-Fi:</b> )rawliteral";
-  html += WiFi.SSID();
-  html += R"rawliteral(</p>
-<p><b>IP:</b> )rawliteral";
-  html += WiFi.localIP().toString();
-  html += R"rawliteral(</p>
-<p><b>Channel ID:</b> <span class="muted">)rawliteral";
-  html += CHANNEL_ID;
-  html += R"rawliteral(</span></p>
-<p><b>Subscriber count:</b> )rawliteral";
-  html += subscriberCount;
-  html += R"rawliteral(</p>
-</div>
+bool readTouch(int&x,int&y){
+  if(millis()-lastTouch<220||!touch.touched())return false;
+  TS_Point p=touch.getPoint();
+  x=constrain(map(p.x,TX0,TX1,0,319),0,319);
+  y=constrain(map(p.y,TY0,TY1,0,239),0,239);
+  lastTouch=millis(); return true;
+}
+void handleTouch(){
+  int x,y;if(!readTouch(x,y))return;
+  if(sleeping){wakeUntil=millis()+(unsigned long)wakeSec*1000UL;sleeping=false;backlight(brightness);return;}
+  if(inSleepWindow())wakeUntil=millis()+(unsigned long)wakeSec*1000UL;
 
-<div class="card">
-<h2>YouTube API</h2>
-<p>)rawliteral";
-  html += youtubeApiKey.isEmpty()
-    ? "<span class=\"muted\">No API key saved yet.</span>"
-    : "<span class=\"ok\">API key is saved on this display.</span>";
-  html += R"rawliteral(</p>
-<form method="POST" action="/apikey">
-<label for="apikey"><b>YouTube Data API key</b></label>
-<input id="apikey" name="apikey" type="password" autocomplete="off" placeholder="Paste API key">
-<button type="submit">Save API key</button>
-</form>
-<small>The API key is stored on the ESP32, not in the public GitHub source.</small>
-</div>
-
-<div class="card">
-<h2>Brightness</h2>
-<label for="brightness"><b>Brightness:</b> <span id="value">)rawliteral";
-  html += String(brightnessPercent);
-  html += R"rawliteral(%</span></label>
-<input id="brightness" type="range" min="0" max="100" value=")rawliteral";
-  html += String(brightnessPercent);
-  html += R"rawliteral(">
-<p><button id="saveBrightness">Save brightness</button></p>
-</div>
-
-<script>
-const slider=document.getElementById('brightness');
-const value=document.getElementById('value');
-slider.addEventListener('input',()=>value.textContent=slider.value+'%');
-document.getElementById('saveBrightness').addEventListener('click',async()=>{
-  await fetch('/brightness?value='+slider.value);
-  document.getElementById('saveBrightness').textContent='Saved';
-  setTimeout(()=>document.getElementById('saveBrightness').textContent='Save brightness',1000);
-});
-</script>
-</body>
-</html>
-)rawliteral";
-  return html;
+  if(screen==MAIN){if(x>=245&&y>=180)settingsScreen();return;}
+  if(screen==SETTINGS){
+    if(y<42&&x<75)mainScreen();
+    else if(y>=40&&y<78){if(x>=260)saveBrightness(brightness+10);else if(x>=190)saveBrightness(brightness-10);settingsScreen();}
+    else if(y>=78&&y<116){cycleRefresh();settingsScreen();}
+    else if(y>=116&&y<154){sleepOn=!sleepOn;prefs.putBool("sleep_on",sleepOn);settingsScreen();updateSleep();}
+    else if(y>=154&&y<192)sleepScreen();
+    else if(y>=192){cycleWake();settingsScreen();}
+    return;
+  }
+  if(screen==SLEEPSET){
+    if(y<42&&x<75)settingsScreen();
+    else if(y>=48&&y<96&&x>=190){adjust(sleepStart,x>=260?30:-30);prefs.putUShort("sleep_start",sleepStart);sleepScreen();}
+    else if(y>=96&&y<144&&x>=190){adjust(sleepEnd,x>=260?30:-30);prefs.putUShort("sleep_end",sleepEnd);sleepScreen();}
+  }
 }
 
-void startWebServer() {
-  server.on("/", HTTP_GET, []() {
-    server.send(200, "text/html", settingsPage());
+String page(){
+  String h=R"HTML(<!doctype html><meta name=viewport content="width=device-width,initial-scale=1"><title>LiftLogic Display</title>
+<style>:root{color-scheme:dark;--a:#19b8ff;--b:#8b4dff}*{box-sizing:border-box}body{font-family:system-ui;max-width:620px;margin:auto;padding:28px 18px;background:#07080b;color:#f7f7fb}.brand{font-size:30px;font-weight:850}.bar{height:3px;background:linear-gradient(90deg,var(--a),var(--b));margin:10px 0 22px}.card{background:#11141a;border:1px solid #29303b;border-radius:16px;padding:18px;margin:14px 0}label{display:block;margin-top:12px}input,select,button{width:100%;padding:11px;margin-top:7px;border-radius:9px;border:1px solid #343b49;background:#090b10;color:white}button{border:0;background:linear-gradient(90deg,var(--a),var(--b));font-weight:700}.muted{color:#9ca3af}</style>
+<div class=brand>LiftLogic</div><div class=muted>Subscriber Display · v)HTML";
+  h+=FW;
+  h+=R"HTML(</div><div class=bar></div><div class=card><b>Status</b><p>Subscribers: )HTML";
+  h+=count; h+="<br>Wi-Fi: "+WiFi.SSID()+"<br>IP: "+WiFi.localIP().toString();
+  h+=R"HTML(</p><button onclick="fetch('/refresh').then(()=>location.reload())">Refresh now</button></div>
+<div class=card><b>Display</b><label>Brightness <span id=bv></span></label><input id=b type=range min=0 max=100 step=5><button id=bs>Save brightness</button>
+<label>Refresh interval</label><select id=p><option value=15>15 seconds</option><option value=30>30 seconds</option><option value=60>1 minute</option><option value=300>5 minutes</option></select><button id=ps>Save refresh interval</button></div>
+<div class=card><b>Sleep timer</b><form method=post action=/sleep><label><input style="width:auto" type=checkbox name=enabled value=1 )HTML";
+  if(sleepOn)h+="checked";
+  h+=R"HTML(> Enable automatic sleep</label><label>Sleep at</label><input type=time name=start value=")HTML"+time24(sleepStart)+
+     R"HTML("><label>Wake at</label><input type=time name=end value=")HTML"+time24(sleepEnd)+
+     R"HTML("><label>Tap-to-wake</label><select name=wake><option value=15>15 seconds</option><option value=30>30 seconds</option><option value=60>1 minute</option><option value=120>2 minutes</option></select><button>Save sleep settings</button></form><p class=muted>Mountain Time. During sleep the backlight turns fully off; tap the screen to wake it temporarily.</p></div>
+<div class=card><b>YouTube API</b><p class=muted>)HTML";
+  h+=apiKey.isEmpty()?"No API key saved.":"API key saved on this display.";
+  h+=R"HTML(</p><form method=post action=/apikey><input name=apikey type=password autocomplete=off placeholder="Paste a new API key"><button>Save API key</button></form></div>
+<script>const b=document.getElementById('b'),bv=document.getElementById('bv'),p=document.getElementById('p');b.value=)HTML"+String(brightness)+
+     R"HTML(;bv.textContent=b.value+'%';b.oninput=()=>bv.textContent=b.value+'%';p.value=)HTML"+String(refreshSec)+
+     R"HTML(;document.getElementById('bs').onclick=()=>fetch('/brightness?value='+b.value);document.getElementById('ps').onclick=()=>fetch('/poll?seconds='+p.value);document.querySelector('select[name=wake]').value=)HTML"+String(wakeSec)+
+     R"HTML(;</script>)HTML";
+  return h;
+}
+
+void web(){
+  server.on("/",HTTP_GET,[]{server.send(200,"text/html",page());});
+  server.on("/brightness",HTTP_GET,[]{
+    if(!server.hasArg("value")){server.send(400,"text/plain","Missing");return;}
+    saveBrightness(server.arg("value").toInt());server.send(200,"text/plain","OK");
   });
-
-  server.on("/brightness", HTTP_GET, []() {
-    if (!server.hasArg("value")) {
-      server.send(400, "text/plain", "Missing value");
-      return;
-    }
-    int value = server.arg("value").toInt();
-    setBrightness(constrain(value, 0, 100));
-    server.send(200, "text/plain", "OK");
+  server.on("/poll",HTTP_GET,[]{
+    int v=server.arg("seconds").toInt();bool ok=false;for(uint16_t a:REFRESHES)if(v==a)ok=true;
+    if(!ok){server.send(400,"text/plain","Bad interval");return;}
+    refreshSec=v;prefs.putUShort("refresh_s",refreshSec);lastPoll=millis();server.send(200,"text/plain","OK");
   });
-
-  server.on("/apikey", HTTP_POST, []() {
-    if (!server.hasArg("apikey") || server.arg("apikey").length() < 10) {
-      server.send(400, "text/plain", "Missing or invalid API key");
-      return;
-    }
-
-    youtubeApiKey = server.arg("apikey");
-    youtubeApiKey.trim();
-    prefs.putString("yt_api_key", youtubeApiKey);
-
-    subscriberCount = "--";
-    lastStatus = "Checking YouTube...";
-    drawCounterScreen();
-    fetchSubscriberCount();
-
-    server.sendHeader("Location", "/", true);
-    server.send(303, "text/plain", "");
+  server.on("/sleep",HTTP_POST,[]{
+    sleepOn=server.hasArg("enabled");uint16_t v;
+    if(parseTime(server.arg("start"),v))sleepStart=v;if(parseTime(server.arg("end"),v))sleepEnd=v;
+    int w=server.arg("wake").toInt();for(uint16_t a:WAKES)if(w==a)wakeSec=w;
+    prefs.putBool("sleep_on",sleepOn);prefs.putUShort("sleep_start",sleepStart);prefs.putUShort("sleep_end",sleepEnd);prefs.putUShort("wake_s",wakeSec);
+    updateSleep();server.sendHeader("Location","/",true);server.send(303,"text/plain","");
   });
-
-  server.on("/refresh", HTTP_GET, []() {
-    bool ok = fetchSubscriberCount();
-    server.send(ok ? 200 : 500, "text/plain", ok ? subscriberCount : lastStatus);
+  server.on("/apikey",HTTP_POST,[]{
+    if(!server.hasArg("apikey")||server.arg("apikey").length()<10){server.send(400,"text/plain","Invalid key");return;}
+    apiKey=server.arg("apikey");apiKey.trim();prefs.putString("yt_api_key",apiKey);count="--";drawCount(true);fetchCount();
+    server.sendHeader("Location","/",true);server.send(303,"text/plain","");
   });
-
+  server.on("/refresh",HTTP_GET,[]{bool ok=fetchCount();server.send(ok?200:500,"text/plain",ok?count:statusText);});
   server.begin();
 }
 
-void setup() {
-  Serial.begin(115200);
+void setup(){
+  Serial.begin(115200);prefs.begin("liftlogic",false);
+  brightness=prefs.getUChar("brightness",80);apiKey=prefs.getString("yt_api_key","");
+  refreshSec=prefs.getUShort("refresh_s",15);sleepOn=prefs.getBool("sleep_on",false);
+  sleepStart=prefs.getUShort("sleep_start",1380);sleepEnd=prefs.getUShort("sleep_end",420);wakeSec=prefs.getUShort("wake_s",30);
 
-  prefs.begin("liftlogic", false);
-  brightnessPercent = prefs.getUChar("brightness", 80);
-  youtubeApiKey = prefs.getString("yt_api_key", "");
+  tft.init();tft.setRotation(1);
+  ledcSetup(BL_CH,BL_FREQ,8);ledcAttachPin(BL_PIN,BL_CH);backlight(brightness);
+  touchSPI.begin(T_CLK,T_MISO,T_MOSI,T_CS);touch.begin(touchSPI);touch.setRotation(1);
 
-  tft.init();
-  tft.setRotation(1);
+  setupScreen();WiFi.mode(WIFI_STA);WiFiManager wm;wm.setHostname("liftlogic-display");
+  if(!wm.autoConnect("LiftLogic-Setup")){delay(2000);ESP.restart();}
+  configTzTime(TZ_INFO,"pool.ntp.org","time.nist.gov");web();lastWifi=true;
 
-  ledcSetup(BACKLIGHT_CHANNEL, BACKLIGHT_FREQ, BACKLIGHT_RESOLUTION);
-  ledcAttachPin(BACKLIGHT_PIN, BACKLIGHT_CHANNEL);
-  setBrightness(brightnessPercent);
-
-  drawSetupScreen();
-
-  WiFi.mode(WIFI_STA);
-  WiFiManager wifiManager;
-  wifiManager.setHostname("liftlogic-display");
-
-  bool connected = wifiManager.autoConnect("LiftLogic-Setup");
-  if (!connected) {
-    tft.fillScreen(TFT_BLACK);
-    drawCentered("Wi-Fi setup failed", 100, 4, TFT_RED);
-    drawCentered("Restarting...", 150, 2);
-    delay(2500);
-    ESP.restart();
-  }
-
-  startWebServer();
-
-  if (youtubeApiKey.isEmpty()) {
-    drawApiKeyScreen();
-  } else {
-    lastStatus = "Checking YouTube...";
-    drawCounterScreen();
-    fetchSubscriberCount();
-  }
-
-  Serial.print("LiftLogic display online at http://");
-  Serial.println(WiFi.localIP());
+  if(apiKey.isEmpty())apiScreen();else{mainScreen();fetchCount();}
+  updateSleep();
 }
-
-void loop() {
-  server.handleClient();
-
-  if (WiFi.status() != WL_CONNECTED) {
-    static unsigned long lastReconnect = 0;
-    if (millis() - lastReconnect > 10000) {
-      lastReconnect = millis();
-      WiFi.reconnect();
-    }
-  } else if (!youtubeApiKey.isEmpty() && millis() - lastYouTubePoll >= YOUTUBE_POLL_MS) {
-    lastYouTubePoll = millis();
-    fetchSubscriberCount();
-  }
-
+void loop(){
+  server.handleClient();handleTouch();updateSleep();
+  bool wc=WiFi.status()==WL_CONNECTED;
+  if(wc!=lastWifi){lastWifi=wc;if(screen==MAIN)wifiIcon();}
+  if(!wc){static unsigned long r=0;if(millis()-r>10000){r=millis();WiFi.reconnect();}}
+  else if(!apiKey.isEmpty()&&millis()-lastPoll>=(unsigned long)refreshSec*1000UL){lastPoll=millis();fetchCount();}
   delay(2);
 }

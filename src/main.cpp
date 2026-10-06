@@ -19,7 +19,7 @@ WebServer server(80);
 Preferences prefs;
 
 constexpr char CHANNEL_ID[]="UC0F9K9qnsopawSgePiOls3g";
-constexpr char FW[]="0.4.0";
+constexpr char FW[]="0.4.1";
 constexpr char TZ_INFO[]="MST7MDT,M3.2.0/2,M11.1.0/2";
 constexpr char OTA_MANIFEST[]="https://zacharystewartlemon-a11y.github.io/liftlogic-subscriber-display/latest.json";
 constexpr unsigned long OTA_INTERVAL_MS=6UL*60UL*60UL*1000UL;
@@ -39,7 +39,7 @@ const uint16_t WAKES[]={15,30,60,120};
 
 uint8_t brightness=80;
 uint16_t refreshSec=15,sleepStart=1380,sleepEnd=420,wakeSec=30;
-bool sleepOn=false,sleeping=false,lastWifi=false,autoUpdate=true;
+bool sleepOn=false,sleeping=false,lastWifi=false,autoUpdate=true,flip180=false;
 bool otaInitialChecked=false,otaCheckRequested=false,otaBusy=false;
 String apiKey,count="--",shown="",statusText="Waiting",otaStatus="Not checked yet";
 unsigned long lastPoll=0,wakeUntil=0,lastTouch=0,lastOtaCheck=0;
@@ -174,10 +174,24 @@ void sleepScreen(){
 void updateScreen(){
   screen=UPDATESET; tft.fillScreen(TFT_BLACK);
   text("<",18,20,BLUE,4,ML_DATUM); freeText("Software",160,21,TFT_WHITE,FSSB12);
-  row(48,"Installed",String("v")+FW);
-  row(92,"Auto update",autoUpdate?"ON   >":"OFF   >");
-  row(136,"Check now","Tap   >");
-  text(otaStatus,160,204,DIM,2);
+  row(40,"Installed",String("v")+FW);
+  row(78,"Auto update",autoUpdate?"ON   >":"OFF   >");
+  row(116,"Check now","Tap   >");
+  row(154,"Screen flip",flip180?"180 deg   >":"Normal   >");
+  text(otaStatus,160,224,DIM,2);
+}
+void redrawCurrent(){
+  if(screen==MAIN)mainScreen();
+  else if(screen==SETTINGS)settingsScreen();
+  else if(screen==SLEEPSET)sleepScreen();
+  else updateScreen();
+}
+void setFlip(bool flipped){
+  flip180=flipped;
+  prefs.putBool("flip180",flip180);
+  tft.setRotation(flip180?3:1);
+  touch.setRotation(flip180?3:1);
+  redrawCurrent();
 }
 
 
@@ -296,8 +310,9 @@ void handleTouch(){
   }
   if(screen==UPDATESET){
     if(y<42&&x<75)settingsScreen();
-    else if(y>=92&&y<136){autoUpdate=!autoUpdate;prefs.putBool("auto_update",autoUpdate);updateScreen();}
-    else if(y>=136&&y<190){otaCheckRequested=true;otaStatus="Update check queued";updateScreen();}
+    else if(y>=78&&y<116){autoUpdate=!autoUpdate;prefs.putBool("auto_update",autoUpdate);updateScreen();}
+    else if(y>=116&&y<154){otaCheckRequested=true;otaStatus="Update check queued";updateScreen();}
+    else if(y>=154&&y<198){setFlip(!flip180);}
   }
 }
 
@@ -310,7 +325,8 @@ String page(){
   h+=count; h+="<br>Wi-Fi: "+WiFi.SSID()+"<br>IP: "+WiFi.localIP().toString();
   h+=R"HTML(</p><button onclick="fetch('/refresh').then(()=>location.reload())">Refresh now</button></div>
 <div class=card><b>Display</b><label>Brightness <span id=bv></span></label><input id=b type=range min=0 max=100 step=5><button id=bs>Save brightness</button>
-<label>Refresh interval</label><select id=p><option value=15>15 seconds</option><option value=30>30 seconds</option><option value=60>1 minute</option><option value=300>5 minutes</option></select><button id=ps>Save refresh interval</button></div>
+<label>Refresh interval</label><select id=p><option value=15>15 seconds</option><option value=30>30 seconds</option><option value=60>1 minute</option><option value=300>5 minutes</option></select><button id=ps>Save refresh interval</button>
+<label><input id=flip style="width:auto" type=checkbox )HTML"+String(flip180?"checked":"")+R"HTML(> Flip screen 180°</label></div>
 <div class=card><b>Sleep timer</b><form method=post action=/sleep><label><input style="width:auto" type=checkbox name=enabled value=1 )HTML";
   if(sleepOn)h+="checked";
   h+=R"HTML(> Enable automatic sleep</label><label>Sleep at</label><input type=time name=start value=")HTML"+time24(sleepStart)+
@@ -325,7 +341,7 @@ String page(){
 <script>const b=document.getElementById('b'),bv=document.getElementById('bv'),p=document.getElementById('p');b.value=)HTML"+String(brightness)+
      R"HTML(;bv.textContent=b.value+'%';b.oninput=()=>bv.textContent=b.value+'%';p.value=)HTML"+String(refreshSec)+
      R"HTML(;document.getElementById('bs').onclick=()=>fetch('/brightness?value='+b.value);document.getElementById('ps').onclick=()=>fetch('/poll?seconds='+p.value);document.querySelector('select[name=wake]').value=)HTML"+String(wakeSec)+
-     R"HTML(;document.getElementById('au').onchange=e=>fetch('/autoupdate?enabled='+(e.target.checked?1:0));document.getElementById('uc').onclick=async()=>{document.getElementById('us').textContent='Update check queued...';await fetch('/update');};</script>)HTML";
+     R"HTML(;document.getElementById('au').onchange=e=>fetch('/autoupdate?enabled='+(e.target.checked?1:0));document.getElementById('uc').onclick=async()=>{document.getElementById('us').textContent='Update check queued...';await fetch('/update');};document.getElementById('flip').onchange=e=>fetch('/flip?enabled='+(e.target.checked?1:0));</script>)HTML";
   return h;
 }
 
@@ -356,6 +372,9 @@ void web(){
   server.on("/autoupdate",HTTP_GET,[]{
     autoUpdate=server.arg("enabled")=="1";prefs.putBool("auto_update",autoUpdate);server.send(200,"text/plain","OK");
   });
+  server.on("/flip",HTTP_GET,[]{
+    setFlip(server.arg("enabled")=="1");server.send(200,"text/plain","OK");
+  });
   server.on("/update",HTTP_GET,[]{
     otaCheckRequested=true;server.send(202,"text/plain","Update check queued. The display will reboot automatically if a newer version is available.");
   });
@@ -368,10 +387,11 @@ void setup(){
   refreshSec=prefs.getUShort("refresh_s",15);sleepOn=prefs.getBool("sleep_on",false);
   sleepStart=prefs.getUShort("sleep_start",1380);sleepEnd=prefs.getUShort("sleep_end",420);wakeSec=prefs.getUShort("wake_s",30);
   autoUpdate=prefs.getBool("auto_update",true);
+  flip180=prefs.getBool("flip180",false);
 
-  tft.init();tft.setRotation(1);
+  tft.init();tft.setRotation(flip180?3:1);
   ledcSetup(BL_CH,BL_FREQ,8);ledcAttachPin(BL_PIN,BL_CH);backlight(brightness);
-  touchSPI.begin(T_CLK,T_MISO,T_MOSI,T_CS);touch.begin(touchSPI);touch.setRotation(1);
+  touchSPI.begin(T_CLK,T_MISO,T_MOSI,T_CS);touch.begin(touchSPI);touch.setRotation(flip180?3:1);
 
   setupScreen();WiFi.mode(WIFI_STA);WiFiManager wm;wm.setHostname("liftlogic-display");
   if(!wm.autoConnect("LiftLogic-Setup")){delay(2000);ESP.restart();}

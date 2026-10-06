@@ -42,6 +42,20 @@ jobs:
           cp .pio/build/cyd/bootloader.bin site/bootloader.bin
           cp .pio/build/cyd/partitions.bin site/partitions.bin
 
+          python - <<'PY'
+          import hashlib, json
+          from pathlib import Path
+
+          manifest = json.loads(Path("installer/manifest.json").read_text())
+          firmware = Path("site/firmware.bin")
+          latest = {
+              "version": manifest["version"],
+              "firmware": "https://zacharystewartlemon-a11y.github.io/liftlogic-subscriber-display/firmware.bin",
+              "sha256": hashlib.sha256(firmware.read_bytes()).hexdigest()
+          }
+          Path("site/latest.json").write_text(json.dumps(latest, separators=(",", ":")))
+          PY
+
           if [ -f .pio/build/cyd/boot_app0.bin ]; then
             cp .pio/build/cyd/boot_app0.bin site/boot_app0.bin
           else

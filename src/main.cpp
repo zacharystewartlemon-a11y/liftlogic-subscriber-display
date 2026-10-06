@@ -6,6 +6,7 @@
 #include <WiFiManager.h>
 #include <Preferences.h>
 #include <HTTPClient.h>
+#include <HTTPUpdate.h>
 #include <WiFiClientSecure.h>
 #include <ArduinoJson.h>
 #include <SPI.h>
@@ -18,8 +19,11 @@ WebServer server(80);
 Preferences prefs;
 
 constexpr char CHANNEL_ID[]="UC0F9K9qnsopawSgePiOls3g";
-constexpr char FW[]="0.3.1";
+constexpr char FW[]="0.4.0";
 constexpr char TZ_INFO[]="MST7MDT,M3.2.0/2,M11.1.0/2";
+constexpr char OTA_MANIFEST[]="https://zacharystewartlemon-a11y.github.io/liftlogic-subscriber-display/latest.json";
+constexpr unsigned long OTA_INTERVAL_MS=6UL*60UL*60UL*1000UL;
+constexpr unsigned long OTA_FIRST_CHECK_MS=60UL*1000UL;
 
 constexpr uint8_t BL_PIN=21, BL_CH=7;
 constexpr uint32_t BL_FREQ=20000;
@@ -29,17 +33,18 @@ constexpr int TOUCH_X_MIN=200,TOUCH_X_MAX=3700,TOUCH_Y_MIN=240,TOUCH_Y_MAX=3800;
 SPIClass touchSPI(VSPI);
 XPT2046_Touchscreen touch(T_CS,T_IRQ);
 
-const uint16_t BLUE=TFT_CYAN, PURPLE=0x801F, PANEL=0x0841, LINE=0x1082, DIM=0x9CF3;
+const uint16_t BLUE=TFT_CYAN, PURPLE=0x801F, PANEL=TFT_BLACK, LINE=0x1082, DIM=0x9CF3;
 const uint16_t REFRESHES[]={15,30,60,300};
 const uint16_t WAKES[]={15,30,60,120};
 
 uint8_t brightness=80;
 uint16_t refreshSec=15,sleepStart=1380,sleepEnd=420,wakeSec=30;
-bool sleepOn=false,sleeping=false,lastWifi=false;
-String apiKey,count="--",shown="",statusText="Waiting";
-unsigned long lastPoll=0,wakeUntil=0,lastTouch=0;
+bool sleepOn=false,sleeping=false,lastWifi=false,autoUpdate=true;
+bool otaInitialChecked=false,otaCheckRequested=false,otaBusy=false;
+String apiKey,count="--",shown="",statusText="Waiting",otaStatus="Not checked yet";
+unsigned long lastPoll=0,wakeUntil=0,lastTouch=0,lastOtaCheck=0;
 
-enum Screen{MAIN,SETTINGS,SLEEPSET};
+enum Screen{MAIN,SETTINGS,SLEEPSET,UPDATESET};
 Screen screen=MAIN;
 
 void backlight(uint8_t p){ ledcWrite(BL_CH,map(constrain(p,0,100),0,100,0,255)); }
@@ -155,15 +160,81 @@ void settingsScreen(){
   row(40,"Brightness",String(brightness)+"%    -   +");
   row(78,"Refresh",refreshSec==15?"15 sec  >":refreshSec==30?"30 sec  >":refreshSec==60?"1 min  >":"5 min  >");
   row(116,"Auto sleep",String(sleepOn?"ON":"OFF")+"   >");
-  row(154,"Sleep window",time12(sleepStart)+"  >");
-  row(192,"Tap wake",String(wakeSec)+" sec  >");
+  row(154,"Sleep settings",time12(sleepStart)+"  >");
+  row(192,"Software",String("v")+FW+"   >");
 }
 void sleepScreen(){
   screen=SLEEPSET; tft.fillScreen(TFT_BLACK);
   text("<",18,20,BLUE,4,ML_DATUM); freeText("Sleep timer",160,21,TFT_WHITE,FSSB12);
   row(48,"Sleep start",time12(sleepStart)); text("-",225,66,BLUE,4); text("+",292,66,BLUE,4);
   row(96,"Wake time",time12(sleepEnd)); text("-",225,114,BLUE,4); text("+",292,114,BLUE,4);
-  row(144,"Adjust step","30 min"); text("Times save automatically",160,208,DIM,2);
+  row(144,"Tap wake",String(wakeSec)+" sec  >");
+  text("Times save automatically",160,208,DIM,2);
+}
+void updateScreen(){
+  screen=UPDATESET; tft.fillScreen(TFT_BLACK);
+  text("<",18,20,BLUE,4,ML_DATUM); freeText("Software",160,21,TFT_WHITE,FSSB12);
+  row(48,"Installed",String("v")+FW);
+  row(92,"Auto update",autoUpdate?"ON   >":"OFF   >");
+  row(136,"Check now","Tap   >");
+  text(otaStatus,160,204,DIM,2);
+}
+
+
+bool versionNewer(const String&latest,const String&current){
+  int la=0,lb=0,lc=0,ca=0,cb=0,cc=0;
+  if(sscanf(latest.c_str(),"%d.%d.%d",&la,&lb,&lc)<1)return false;
+  sscanf(current.c_str(),"%d.%d.%d",&ca,&cb,&cc);
+  if(la!=ca)return la>ca;
+  if(lb!=cb)return lb>cb;
+  return lc>cc;
+}
+void otaMessage(const String&title,const String&detail){
+  tft.fillScreen(TFT_BLACK); brand();
+  freeText(title,160,104,TFT_WHITE,FSSB18);
+  text(detail,160,148,BLUE,2);
+}
+bool checkForUpdate(bool installIfAvailable){
+  if(WiFi.status()!=WL_CONNECTED||otaBusy)return false;
+  otaBusy=true;
+  otaStatus="Checking...";
+  if(screen==UPDATESET)updateScreen();
+
+  WiFiClientSecure client; client.setInsecure();
+  HTTPClient http; http.setTimeout(10000);
+  if(!http.begin(client,OTA_MANIFEST)){
+    otaStatus="Update check failed"; otaBusy=false; if(screen==UPDATESET)updateScreen(); return false;
+  }
+  int code=http.GET();
+  if(code!=HTTP_CODE_OK){
+    otaStatus="Update check error "+String(code); http.end(); otaBusy=false; if(screen==UPDATESET)updateScreen(); return false;
+  }
+  String payload=http.getString(); http.end();
+  JsonDocument doc;
+  if(deserializeJson(doc,payload)){
+    otaStatus="Bad update response"; otaBusy=false; if(screen==UPDATESET)updateScreen(); return false;
+  }
+  String latest=doc["version"]|"";
+  String firmware=doc["firmware"]|"";
+  if(latest.isEmpty()||firmware.isEmpty()){
+    otaStatus="Update info missing"; otaBusy=false; if(screen==UPDATESET)updateScreen(); return false;
+  }
+  if(!versionNewer(latest,FW)){
+    otaStatus=String("Up to date · v")+FW; otaBusy=false; if(screen==UPDATESET)updateScreen(); return true;
+  }
+  otaStatus=String("v")+latest+" available";
+  if(!installIfAvailable){otaBusy=false;if(screen==UPDATESET)updateScreen();return true;}
+
+  otaMessage("Updating...",String("Installing v")+latest);
+  HTTPUpdate updater;
+  updater.rebootOnUpdate(true);
+  WiFiClientSecure fwClient; fwClient.setInsecure();
+  t_httpUpdate_return result=updater.update(fwClient,firmware);
+  if(result==HTTP_UPDATE_FAILED)otaStatus=String("Update failed: ")+updater.getLastErrorString();
+  else if(result==HTTP_UPDATE_NO_UPDATES)otaStatus="Already up to date";
+  otaBusy=false;
+  if(apiKey.isEmpty())apiScreen();else mainScreen();
+  return result==HTTP_UPDATE_OK;
 }
 
 bool fetchCount(){
@@ -213,13 +284,20 @@ void handleTouch(){
     else if(y>=78&&y<116){cycleRefresh();settingsScreen();}
     else if(y>=116&&y<154){sleepOn=!sleepOn;prefs.putBool("sleep_on",sleepOn);settingsScreen();updateSleep();}
     else if(y>=154&&y<192)sleepScreen();
-    else if(y>=192){cycleWake();settingsScreen();}
+    else if(y>=192)updateScreen();
     return;
   }
   if(screen==SLEEPSET){
     if(y<42&&x<75)settingsScreen();
     else if(y>=48&&y<96&&x>=190){adjust(sleepStart,x>=260?30:-30);prefs.putUShort("sleep_start",sleepStart);sleepScreen();}
     else if(y>=96&&y<144&&x>=190){adjust(sleepEnd,x>=260?30:-30);prefs.putUShort("sleep_end",sleepEnd);sleepScreen();}
+    else if(y>=144&&y<190){cycleWake();sleepScreen();}
+    return;
+  }
+  if(screen==UPDATESET){
+    if(y<42&&x<75)settingsScreen();
+    else if(y>=92&&y<136){autoUpdate=!autoUpdate;prefs.putBool("auto_update",autoUpdate);updateScreen();}
+    else if(y>=136&&y<190){otaCheckRequested=true;otaStatus="Update check queued";updateScreen();}
   }
 }
 
@@ -238,13 +316,16 @@ String page(){
   h+=R"HTML(> Enable automatic sleep</label><label>Sleep at</label><input type=time name=start value=")HTML"+time24(sleepStart)+
      R"HTML("><label>Wake at</label><input type=time name=end value=")HTML"+time24(sleepEnd)+
      R"HTML("><label>Tap-to-wake</label><select name=wake><option value=15>15 seconds</option><option value=30>30 seconds</option><option value=60>1 minute</option><option value=120>2 minutes</option></select><button>Save sleep settings</button></form><p class=muted>Mountain Time. During sleep the backlight turns fully off; tap the screen to wake it temporarily.</p></div>
-<div class=card><b>YouTube API</b><p class=muted>)HTML";
+<div class=card><b>Software update</b><p>Installed: v)HTML"+String(FW)+R"HTML(<br>Automatic updates: <b>)HTML"+String(autoUpdate?"On":"Off")+R"HTML(</b></p>
+<label><input id=au style="width:auto" type=checkbox )HTML"+String(autoUpdate?"checked":"")+R"HTML(> Install new LiftLogic firmware automatically</label>
+<button id=uc>Check for update now</button><p id=us class=muted>)HTML"+otaStatus+R"HTML(</p></div>
+<div class=card><b>YouTube API</b><p class=muted>)HTML"
   h+=apiKey.isEmpty()?"No API key saved.":"API key saved on this display.";
   h+=R"HTML(</p><form method=post action=/apikey><input name=apikey type=password autocomplete=off placeholder="Paste a new API key"><button>Save API key</button></form></div>
 <script>const b=document.getElementById('b'),bv=document.getElementById('bv'),p=document.getElementById('p');b.value=)HTML"+String(brightness)+
      R"HTML(;bv.textContent=b.value+'%';b.oninput=()=>bv.textContent=b.value+'%';p.value=)HTML"+String(refreshSec)+
      R"HTML(;document.getElementById('bs').onclick=()=>fetch('/brightness?value='+b.value);document.getElementById('ps').onclick=()=>fetch('/poll?seconds='+p.value);document.querySelector('select[name=wake]').value=)HTML"+String(wakeSec)+
-     R"HTML(;</script>)HTML";
+     R"HTML(;document.getElementById('au').onchange=e=>fetch('/autoupdate?enabled='+(e.target.checked?1:0));document.getElementById('uc').onclick=async()=>{document.getElementById('us').textContent='Update check queued...';await fetch('/update');};</script>)HTML";
   return h;
 }
 
@@ -272,6 +353,12 @@ void web(){
     server.sendHeader("Location","/",true);server.send(303,"text/plain","");
   });
   server.on("/refresh",HTTP_GET,[]{bool ok=fetchCount();server.send(ok?200:500,"text/plain",ok?count:statusText);});
+  server.on("/autoupdate",HTTP_GET,[]{
+    autoUpdate=server.arg("enabled")=="1";prefs.putBool("auto_update",autoUpdate);server.send(200,"text/plain","OK");
+  });
+  server.on("/update",HTTP_GET,[]{
+    otaCheckRequested=true;server.send(202,"text/plain","Update check queued. The display will reboot automatically if a newer version is available.");
+  });
   server.begin();
 }
 
@@ -280,6 +367,7 @@ void setup(){
   brightness=prefs.getUChar("brightness",80);apiKey=prefs.getString("yt_api_key","");
   refreshSec=prefs.getUShort("refresh_s",15);sleepOn=prefs.getBool("sleep_on",false);
   sleepStart=prefs.getUShort("sleep_start",1380);sleepEnd=prefs.getUShort("sleep_end",420);wakeSec=prefs.getUShort("wake_s",30);
+  autoUpdate=prefs.getBool("auto_update",true);
 
   tft.init();tft.setRotation(1);
   ledcSetup(BL_CH,BL_FREQ,8);ledcAttachPin(BL_PIN,BL_CH);backlight(brightness);
@@ -290,6 +378,7 @@ void setup(){
   configTzTime(TZ_INFO,"pool.ntp.org","time.nist.gov");web();lastWifi=true;
 
   if(apiKey.isEmpty())apiScreen();else{mainScreen();fetchCount();}
+  lastOtaCheck=millis();
   updateSleep();
 }
 void loop(){
@@ -298,5 +387,15 @@ void loop(){
   if(wc!=lastWifi){lastWifi=wc;if(screen==MAIN)wifiIcon();}
   if(!wc){static unsigned long r=0;if(millis()-r>10000){r=millis();WiFi.reconnect();}}
   else if(!apiKey.isEmpty()&&millis()-lastPoll>=(unsigned long)refreshSec*1000UL){lastPoll=millis();fetchCount();}
+
+  if(wc&&!otaBusy){
+    bool dueFirst=autoUpdate&&!otaInitialChecked&&(millis()-lastOtaCheck>=OTA_FIRST_CHECK_MS);
+    bool dueRegular=autoUpdate&&otaInitialChecked&&(millis()-lastOtaCheck>=OTA_INTERVAL_MS);
+    if(otaCheckRequested||dueFirst||dueRegular){
+      bool manual=otaCheckRequested;
+      otaCheckRequested=false;otaInitialChecked=true;lastOtaCheck=millis();
+      checkForUpdate(manual||autoUpdate);
+    }
+  }
   delay(2);
 }

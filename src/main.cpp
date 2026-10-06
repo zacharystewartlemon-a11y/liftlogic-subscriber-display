@@ -18,7 +18,7 @@ WebServer server(80);
 Preferences prefs;
 
 constexpr char CHANNEL_ID[]="UC0F9K9qnsopawSgePiOls3g";
-constexpr char FW[]="0.3.0";
+constexpr char FW[]="0.3.1";
 constexpr char TZ_INFO[]="MST7MDT,M3.2.0/2,M11.1.0/2";
 
 constexpr uint8_t BL_PIN=21, BL_CH=7;
@@ -268,7 +268,7 @@ void web(){
   });
   server.on("/apikey",HTTP_POST,[]{
     if(!server.hasArg("apikey")||server.arg("apikey").length()<10){server.send(400,"text/plain","Invalid key");return;}
-    apiKey=server.arg("apikey");apiKey.trim();prefs.putString("yt_api_key",apiKey);count="--";drawCount(true);fetchCount();
+    apiKey=server.arg("apikey");apiKey.trim();prefs.putString("yt_api_key",apiKey);count="--";mainScreen();fetchCount();
     server.sendHeader("Location","/",true);server.send(303,"text/plain","");
   });
   server.on("/refresh",HTTP_GET,[]{bool ok=fetchCount();server.send(ok?200:500,"text/plain",ok?count:statusText);});

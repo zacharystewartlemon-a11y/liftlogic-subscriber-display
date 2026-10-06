@@ -319,7 +319,7 @@ String page(){
 <div class=card><b>Software update</b><p>Installed: v)HTML"+String(FW)+R"HTML(<br>Automatic updates: <b>)HTML"+String(autoUpdate?"On":"Off")+R"HTML(</b></p>
 <label><input id=au style="width:auto" type=checkbox )HTML"+String(autoUpdate?"checked":"")+R"HTML(> Install new LiftLogic firmware automatically</label>
 <button id=uc>Check for update now</button><p id=us class=muted>)HTML"+otaStatus+R"HTML(</p></div>
-<div class=card><b>YouTube API</b><p class=muted>)HTML"
+<div class=card><b>YouTube API</b><p class=muted>)HTML";
   h+=apiKey.isEmpty()?"No API key saved.":"API key saved on this display.";
   h+=R"HTML(</p><form method=post action=/apikey><input name=apikey type=password autocomplete=off placeholder="Paste a new API key"><button>Save API key</button></form></div>
 <script>const b=document.getElementById('b'),bv=document.getElementById('bv'),p=document.getElementById('p');b.value=)HTML"+String(brightness)+

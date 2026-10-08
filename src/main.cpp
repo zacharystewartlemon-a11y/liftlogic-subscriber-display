@@ -19,7 +19,7 @@ WebServer server(80);
 Preferences prefs;
 
 constexpr char CHANNEL_ID[]="UC0F9K9qnsopawSgePiOls3g";
-constexpr char FW[]="0.4.1";
+constexpr char FW[]="0.4.2";
 constexpr char TZ_INFO[]="MST7MDT,M3.2.0/2,M11.1.0/2";
 constexpr char OTA_MANIFEST[]="https://zacharystewartlemon-a11y.github.io/liftlogic-subscriber-display/latest.json";
 constexpr unsigned long OTA_INTERVAL_MS=6UL*60UL*60UL*1000UL;
@@ -39,12 +39,13 @@ const uint16_t WAKES[]={15,30,60,120};
 
 uint8_t brightness=80;
 uint16_t refreshSec=15,sleepStart=1380,sleepEnd=420,wakeSec=30;
+uint32_t goalTarget=500;
 bool sleepOn=false,sleeping=false,lastWifi=false,autoUpdate=true,flip180=false;
 bool otaInitialChecked=false,otaCheckRequested=false,otaBusy=false;
 String apiKey,count="--",shown="",statusText="Waiting",otaStatus="Not checked yet";
 unsigned long lastPoll=0,wakeUntil=0,lastTouch=0,lastOtaCheck=0;
 
-enum Screen{MAIN,SETTINGS,SLEEPSET,UPDATESET};
+enum Screen{MAIN,SETTINGS,SLEEPSET,UPDATESET,GOALSET};
 Screen screen=MAIN;
 
 void backlight(uint8_t p){ ledcWrite(BL_CH,map(constrain(p,0,100),0,100,0,255)); }
@@ -120,11 +121,29 @@ void dots(){
   tft.fillRect(260,205,60,35,TFT_BLACK);
   for(int i=0;i<3;i++)tft.fillCircle(279+i*10,222,3,TFT_WHITE);
 }
+void drawGoal(){
+  if(screen!=MAIN)return;
+  tft.fillRect(58,201,202,39,TFT_BLACK);
+  uint32_t current=0;
+  bool numeric=count.length()>0;
+  for(size_t i=0;i<count.length();i++) if(!isDigit(count[i])) numeric=false;
+  if(numeric) current=(uint32_t)strtoul(count.c_str(),nullptr,10);
+  const int x=78,y=207,w=164,h=6;
+  tft.drawRoundRect(x,y,w,h,3,PURPLE);
+  if(numeric&&goalTarget>0){
+    uint32_t clamped=current>goalTarget?goalTarget:current;
+    int fill=(int)((uint64_t)(w-2)*clamped/goalTarget);
+    if(fill>0)tft.fillRoundRect(x+1,y+1,fill,h-2,2,BLUE);
+  }
+  String label=String("GOAL  ")+(numeric?String(current):String("--"))+" / "+String(goalTarget);
+  text(label,160,226,TFT_WHITE,2);
+}
 void drawCount(bool force=false){
   if(screen!=MAIN||(!force&&count==shown))return;
   tft.fillRoundRect(42,116,236,70,10,PANEL);
   freeText(count,160,150,TFT_WHITE,FSSB24);
   shown=count;
+  drawGoal();
 }
 void mainScreen(){
   screen=MAIN; tft.fillScreen(TFT_BLACK);
@@ -136,7 +155,7 @@ void mainScreen(){
   tft.drawRoundRect(33,66,254,132,12,PURPLE);
   youtube(67,80); text("SUBSCRIBERS",190,92,TFT_WHITE,4);
   tft.drawFastHLine(60,108,200,LINE);
-  shown=""; drawCount(true); wifiIcon(); dots();
+  shown=""; drawCount(true); wifiIcon(); dots(); drawGoal();
 }
 void setupScreen(){
   tft.fillScreen(TFT_BLACK); brand();
@@ -180,11 +199,29 @@ void updateScreen(){
   row(154,"Screen flip",flip180?"180 deg   >":"Normal   >");
   text(otaStatus,160,224,DIM,2);
 }
+void goalScreen(){
+  screen=GOALSET; tft.fillScreen(TFT_BLACK);
+  text("<",18,20,BLUE,4,ML_DATUM); freeText("Subscriber goal",160,21,TFT_WHITE,FSSB12);
+  row(50,"Current",count);
+  row(96,"Target",String(goalTarget));
+  text("-",220,114,BLUE,4); text("+",292,114,BLUE,4);
+  text("Adjusts by 100 subscribers",160,177,DIM,2);
+  text("Goal is saved on the device",160,210,DIM,2);
+}
+void adjustGoal(int delta){
+  int64_t next=(int64_t)goalTarget+delta;
+  if(next<100)next=100;
+  if(next>100000000)next=100000000;
+  goalTarget=(uint32_t)next;
+  prefs.putUInt("goal",goalTarget);
+  goalScreen();
+}
 void redrawCurrent(){
   if(screen==MAIN)mainScreen();
   else if(screen==SETTINGS)settingsScreen();
   else if(screen==SLEEPSET)sleepScreen();
-  else updateScreen();
+  else if(screen==UPDATESET)updateScreen();
+  else goalScreen();
 }
 void setFlip(bool flipped){
   flip180=flipped;
@@ -291,7 +328,11 @@ void handleTouch(){
   if(sleeping){wakeUntil=millis()+(unsigned long)wakeSec*1000UL;sleeping=false;backlight(brightness);return;}
   if(inSleepWindow())wakeUntil=millis()+(unsigned long)wakeSec*1000UL;
 
-  if(screen==MAIN){if(x>=245&&y>=180)settingsScreen();return;}
+  if(screen==MAIN){
+    if(x>=245&&y>=180)settingsScreen();
+    else if(x>=58&&x<260&&y>=198)goalScreen();
+    return;
+  }
   if(screen==SETTINGS){
     if(y<42&&x<75)mainScreen();
     else if(y>=40&&y<78){if(x>=260)saveBrightness(brightness+10);else if(x>=190)saveBrightness(brightness-10);settingsScreen();}
@@ -313,6 +354,13 @@ void handleTouch(){
     else if(y>=78&&y<116){autoUpdate=!autoUpdate;prefs.putBool("auto_update",autoUpdate);updateScreen();}
     else if(y>=116&&y<154){otaCheckRequested=true;otaStatus="Update check queued";updateScreen();}
     else if(y>=154&&y<198){setFlip(!flip180);}
+    return;
+  }
+  if(screen==GOALSET){
+    if(y<42&&x<75)mainScreen();
+    else if(y>=96&&y<145&&x>=185){
+      adjustGoal(x>=258?100:-100);
+    }
   }
 }
 
@@ -324,6 +372,8 @@ String page(){
   h+=R"HTML(</div><div class=bar></div><div class=card><b>Status</b><p>Subscribers: )HTML";
   h+=count; h+="<br>Wi-Fi: "+WiFi.SSID()+"<br>IP: "+WiFi.localIP().toString();
   h+=R"HTML(</p><button onclick="fetch('/refresh').then(()=>location.reload())">Refresh now</button></div>
+<div class=card><b>Subscriber goal</b><p>Current progress: <b>)HTML"+count+R"HTML( / )HTML"+String(goalTarget)+R"HTML(</b></p>
+<input id=goal type=number min=100 max=100000000 step=100 value=")HTML"+String(goalTarget)+R"HTML(><button id=gs>Save goal</button></div>
 <div class=card><b>Display</b><label>Brightness <span id=bv></span></label><input id=b type=range min=0 max=100 step=5><button id=bs>Save brightness</button>
 <label>Refresh interval</label><select id=p><option value=15>15 seconds</option><option value=30>30 seconds</option><option value=60>1 minute</option><option value=300>5 minutes</option></select><button id=ps>Save refresh interval</button>
 <label><input id=flip style="width:auto" type=checkbox )HTML"+String(flip180?"checked":"")+R"HTML(> Flip screen 180°</label></div>
@@ -341,12 +391,20 @@ String page(){
 <script>const b=document.getElementById('b'),bv=document.getElementById('bv'),p=document.getElementById('p');b.value=)HTML"+String(brightness)+
      R"HTML(;bv.textContent=b.value+'%';b.oninput=()=>bv.textContent=b.value+'%';p.value=)HTML"+String(refreshSec)+
      R"HTML(;document.getElementById('bs').onclick=()=>fetch('/brightness?value='+b.value);document.getElementById('ps').onclick=()=>fetch('/poll?seconds='+p.value);document.querySelector('select[name=wake]').value=)HTML"+String(wakeSec)+
-     R"HTML(;document.getElementById('au').onchange=e=>fetch('/autoupdate?enabled='+(e.target.checked?1:0));document.getElementById('uc').onclick=async()=>{document.getElementById('us').textContent='Update check queued...';await fetch('/update');};document.getElementById('flip').onchange=e=>fetch('/flip?enabled='+(e.target.checked?1:0));</script>)HTML";
+     R"HTML(;document.getElementById('au').onchange=e=>fetch('/autoupdate?enabled='+(e.target.checked?1:0));document.getElementById('uc').onclick=async()=>{document.getElementById('us').textContent='Update check queued...';await fetch('/update');};document.getElementById('flip').onchange=e=>fetch('/flip?enabled='+(e.target.checked?1:0));document.getElementById('gs').onclick=()=>fetch('/goal?target='+document.getElementById('goal').value);</script>)HTML";
   return h;
 }
 
 void web(){
   server.on("/",HTTP_GET,[]{server.send(200,"text/html",page());});
+  server.on("/goal",HTTP_GET,[]{
+    if(!server.hasArg("target")){server.send(400,"text/plain","Missing target");return;}
+    long v=server.arg("target").toInt();
+    if(v<100){server.send(400,"text/plain","Goal must be at least 100");return;}
+    goalTarget=(uint32_t)v;prefs.putUInt("goal",goalTarget);
+    if(screen==MAIN)drawGoal();
+    server.send(200,"text/plain","OK");
+  });
   server.on("/brightness",HTTP_GET,[]{
     if(!server.hasArg("value")){server.send(400,"text/plain","Missing");return;}
     saveBrightness(server.arg("value").toInt());server.send(200,"text/plain","OK");
@@ -388,6 +446,8 @@ void setup(){
   sleepStart=prefs.getUShort("sleep_start",1380);sleepEnd=prefs.getUShort("sleep_end",420);wakeSec=prefs.getUShort("wake_s",30);
   autoUpdate=prefs.getBool("auto_update",true);
   flip180=prefs.getBool("flip180",false);
+  goalTarget=prefs.getUInt("goal",500);
+  if(goalTarget<100)goalTarget=500;
 
   tft.init();tft.setRotation(flip180?3:1);
   ledcSetup(BL_CH,BL_FREQ,8);ledcAttachPin(BL_PIN,BL_CH);backlight(brightness);
